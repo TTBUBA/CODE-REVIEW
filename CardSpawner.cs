@@ -1,4 +1,5 @@
 using Photon.Pun;
+using Photon.Realtime;
 using System.Collections.Generic;
 using UnityEngine;
 
@@ -8,72 +9,115 @@ public class CardSpawner : MonoBehaviourPunCallbacks
     public GameObject[] PointSpawnPlayer;
     public GameObject[] PointSpawnEnemy;
     public List<Card_Info> CardList;
+
     public Camera MainCamera;
     public CardManager CardManager;
 
-    public void Start()
-    {
-        Invoke("SpawnCards", 0.3f); // Delay per assicurarsi che tutti i client siano sincronizzati
-    }
+    private List<GameObject> spawnedCards = new List<GameObject>();
 
-    void SpawnCards()
+    public void Start()
     {
         if (PhotonNetwork.IsMasterClient)
         {
-            SpawnCard(true);  // Carte del master
+            SpawnCards();
+            Debug.Log("MasterClient");
         }
         else
         {
-            SpawnCard(false); // Carte dell'altro client
+            // Gli altri client riceveranno l'istanza
+            photonView.RPC("SyncCards", RpcTarget.AllBuffered);
+            Debug.Log("Client");
         }
     }
 
-    public void SpawnCard(bool isPlayer)
+    private void SpawnCards()
     {
-        for (int i = 0; i < 6; i++)
+        // Spawn player cards
+        for (int i = 0; i < 1; i++)
         {
-            Vector3 spawnPosition = isPlayer ? PointSpawnPlayer[i].transform.position : PointSpawnEnemy[i].transform.position;
+            GameObject card = PhotonNetwork.Instantiate(PrefabsCard.name, PointSpawnPlayer[i].transform.position, Quaternion.identity);
+            ConfigureCard(card, PointSpawnPlayer[i].transform, false);
+        }
 
-            //  crea la carta
-            GameObject card = PhotonNetwork.Instantiate(PrefabsCard.name, spawnPosition, Quaternion.identity);
+        // Spawn enemy cards
+        for (int i = 0; i < 1; i++)
+        {
+            GameObject card = PhotonNetwork.Instantiate(PrefabsCard.name, PointSpawnEnemy[i].transform.position, Quaternion.identity);
+            ConfigureCard(card, PointSpawnEnemy[i].transform, true);
+        }
+    }
 
-            // Calcola il finalIsPlayer per il MasterClient
-            bool finalIsPlayer = PhotonNetwork.IsMasterClient ? isPlayer : !isPlayer;
+    private void ConfigureCard(GameObject card, Transform parent, bool isEnemy)
+    {
+        card.transform.SetParent(parent, false);
+        Movement_Card movementCard = card.GetComponent<Movement_Card>();
+        Card_Display cardDisplay = card.GetComponent<Card_Display>();
 
-            // Sincronizza la configurazione tramite RPC
-            photonView.RPC("ConfigureCardRPC", RpcTarget.All, card.GetComponent<PhotonView>().ViewID, finalIsPlayer, i);
+        if (movementCard != null && cardDisplay != null)
+        {
+            int randomIndex = Random.Range(0, CardList.Count);
+            movementCard.SetCamera(MainCamera);
+            movementCard.SetPositionCard();
+            movementCard.SetObject(CardManager);
+
+            cardDisplay.IsEnemy = isEnemy;
+            cardDisplay.Card_Info = CardList[randomIndex];
+        }
+
+        spawnedCards.Add(card);
+    }
+
+    public override void OnPlayerEnteredRoom(Player newPlayer)
+    {
+        if (PhotonNetwork.IsMasterClient)
+        {
+            SyncCardsWithNewPlayer(newPlayer);
+
+            // Sincronizza fotocamera e CardManager
+            photonView.RPC("SyncEnvironment", newPlayer, MainCamera.GetComponent<PhotonView>().ViewID, CardManager.GetComponent<PhotonView>().ViewID);
+        }
+    }
+
+    private void SyncCardsWithNewPlayer(Player newPlayer)
+    {
+        foreach (GameObject card in spawnedCards)
+        {
+            Card_Display cardDisplay = card.GetComponent<Card_Display>();
+            Vector3 position = card.transform.position;
+            int cardId = cardDisplay.Card_Info.cardId;
+            bool isEnemy = cardDisplay.IsEnemy;
+
+            photonView.RPC("SyncCard", newPlayer, position, cardId, isEnemy);
         }
     }
 
     [PunRPC]
-    public void ConfigureCardRPC(int viewID, bool isPlayer, int index)
+    private void SyncCard(Vector3 position, int cardId, bool isEnemy)
     {
-        PhotonView cardPhotonView = PhotonView.Find(viewID);
-        if (cardPhotonView != null)
+        GameObject card = Instantiate(PrefabsCard, position, Quaternion.identity);
+        Card_Display cardDisplay = card.GetComponent<Card_Display>();
+        Movement_Card movementCard = card.GetComponent<Movement_Card>();
+
+        cardDisplay.IsEnemy = isEnemy;
+        cardDisplay.Card_Info = CardList.Find(c => c.cardId == cardId);
+
+        Transform parent = isEnemy ? PointSpawnEnemy[0].transform : PointSpawnPlayer[0].transform;
+        card.transform.SetParent(parent, false);
+
+        if (movementCard != null)
         {
-            GameObject card = cardPhotonView.gameObject;
-
-            // Imposta il genitore corretto basandosi su isPlayer
-            Transform parent = isPlayer ? PointSpawnPlayer[index].transform : PointSpawnEnemy[index].transform;
-            card.transform.SetParent(parent, false);
-            card.transform.localPosition = Vector3.zero;
-            Debug.Log(parent);
-
-            // Configura i componenti della carta
-            Movement_Card movementCard = card.GetComponent<Movement_Card>();
-            Card_Display cardDisplay = card.GetComponent<Card_Display>();
-     
-            Random.InitState((int)PhotonNetwork.Time + index);
-            int randomIndex = Random.Range(0, CardList.Count);
-            if (movementCard != null && cardDisplay != null)
-            {
-                movementCard.SetCamera(MainCamera);
-                movementCard.SetPositionCard();
-                movementCard.SetObject(CardManager);
-                cardDisplay.IsEnemy = !isPlayer;
-                cardDisplay.Card_Info = CardList[randomIndex];
-            }
+            movementCard.SetCamera(MainCamera);
+            movementCard.SetObject(CardManager);
+            movementCard.SetPositionCard();
         }
+
+        spawnedCards.Add(card);
     }
 
+    [PunRPC]
+    private void SyncEnvironment(int cameraViewID, int cardManagerViewID)
+    {
+        MainCamera = PhotonView.Find(cameraViewID).GetComponent<Camera>();
+        CardManager = PhotonView.Find(cardManagerViewID).GetComponent<CardManager>();
+    }
 }
